@@ -256,6 +256,20 @@ This file can be overridden per conductor by placing a POLICY.md in the conducto
 5. **Never send messages to running sessions.** Only respond to sessions in "waiting" status.
 6. **Log everything.** Every action you take goes in ` + "`" + `./task-log.md` + "`" + `.
 
+## Remote Channel Formatting (Telegram/Slack/Discord)
+
+Every reply you write may be relayed to a phone. Telegram does NOT render markdown:
+tables, headers, and bold arrive as raw ` + "`" + `|---|` + "`" + ` and ` + "`" + `**` + "`" + ` characters and wrap into
+unreadable soup on a narrow screen.
+
+- **Never use markdown tables.** For per-session/per-item info, use one short line per
+  item instead: ` + "`" + `name - status - note` + "`" + `.
+- No ` + "`" + `#` + "`" + ` headers, no ` + "`" + `**bold**` + "`" + `, no ` + "`" + `---` + "`" + ` rules. Plain sentences and simple ` + "`" + `-` + "`" + ` bullets only.
+- Keep lines short; prefer vertical lists over anything column-shaped.
+- Lead with the answer/outcome in the first line.
+- Keep replies under ~3000 characters — longer gets truncated in transit.
+- This applies to ALL replies including ` + "`" + `[STATUS]` + "`" + ` heartbeat responses.
+
 ## Auto-Response Guidelines
 
 ### Safe to Auto-Respond
