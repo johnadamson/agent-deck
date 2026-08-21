@@ -147,13 +147,24 @@ func TestConductorClaudeSettings_NoBlanketDirWrite(t *testing.T) {
 		}
 	}
 
-	// Scoped data-file writes ARE allowed.
+	// Scoped data-file writes ARE allowed — in the Edit(path) form, which is the
+	// only form the file permission check consults.
 	for _, allow := range []string{
-		"Write(//" + dir + "/state.json)",
-		"Write(//" + dir + "/task-log.md)",
+		"Edit(//" + dir + "/*.md)",
+		"Edit(//" + dir + "/state.json)",
 	} {
 		if !permContains(perms.Allow, allow) {
 			t.Errorf("expected scoped data-file write allowed: %q\nallow=%v", allow, perms.Allow)
+		}
+	}
+
+	// Regression guard for the bug this replaced: a Write(path) allow rule is
+	// never matched by the file permission check, so emitting one produces a rule
+	// that looks like policy and grants nothing. state.json shipped that way and
+	// prompted on every heartbeat. Every data-file allow must be Edit(path).
+	for _, entry := range perms.Allow {
+		if strings.HasPrefix(entry, "Write(//") {
+			t.Errorf("allow list must not contain a path-scoped Write() rule (never matched; use Edit()): %q", entry)
 		}
 	}
 }
