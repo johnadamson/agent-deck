@@ -29,6 +29,9 @@ import (
 //     hook/spawn, defeating dangerous_mode=false. Writes are scoped to data
 //     files (*.md, state.json), and explicit deny rules guard the executable/
 //     config paths (deny takes precedence over any broader glob).
+//   - All path-scoped file rules use the Edit(path) form, which governs every
+//     file-modifying tool. Write(path) rules are never matched — see
+//     conductorWriteAllowPatterns.
 
 // conductorAutoAllowCommands are the read-only / safe CLI commands a conductor
 // may run without a prompt. Pure reads plus restart (replays the stored command
@@ -71,12 +74,22 @@ var conductorAskCommands = []string{
 // conductorWriteAllowPatterns builds the scoped file-write allowlist for a
 // conductor directory. Narrow on purpose: only the conductor's data files, never
 // a recursive /** over the dir.
+//
+// Path-scoped file rules MUST use the Edit(path) form. Claude Code's file
+// permission check consults only Edit(path), and that one rule covers every
+// file-modifying tool (Edit, Write, NotebookEdit) — there is no separate Write
+// channel. A Write(path) entry is syntactically accepted, sits in settings.json
+// looking like policy, and is never matched. This bit us: state.json shipped
+// with only a Write(path) allow, so writing it prompted on every heartbeat while
+// *.md worked purely because it was covered by the Edit glob. Do not add
+// Write(path) entries here expecting them to grant anything.
+//
+// Note the //-prefix: dir is already absolute, so "//" + dir yields "///home/...".
+// That is the absolute-path marker, not a typo.
 func conductorWriteAllowPatterns(dir string) []string {
 	return []string{
-		"Edit(//" + dir + "/*.md)",
-		"Write(//" + dir + "/*.md)",
-		"Write(//" + dir + "/state.json)",
-		"Write(//" + dir + "/task-log.md)",
+		"Edit(//" + dir + "/*.md)", // covers task-log.md and any other conductor markdown
+		"Edit(//" + dir + "/state.json)",
 	}
 }
 
@@ -84,6 +97,12 @@ func conductorWriteAllowPatterns(dir string) []string {
 // inside a conductor directory. Deny takes precedence over allow, so even if a
 // broader allow glob is ever introduced these stay protected from
 // self-escalation.
+//
+// The Edit(path) entry is the load-bearing one for each path (see
+// conductorWriteAllowPatterns). The Write(path) twins are inert today and kept
+// deliberately: an unmatched deny costs nothing, and pruning entries from a
+// hardened list is how protection gets dropped by accident. Every path here must
+// keep its Edit(path) form — that is the one enforcement depends on.
 func conductorWriteDenyPatterns(dir string) []string {
 	return []string{
 		"Write(//" + dir + "/.claude/**)",
