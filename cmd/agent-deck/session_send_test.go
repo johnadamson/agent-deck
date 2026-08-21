@@ -234,6 +234,90 @@ func TestShouldSkipConductorHeartbeatSend_DisabledThresholdNeverSkips(t *testing
 	}
 }
 
+// TestShouldSkipConductorHeartbeatSend_SkipsWhenHeartbeatDisabled is the
+// zombie-timer regression: an installed heartbeat timer keeps firing after the
+// per-conductor heartbeat flag is flipped false, because the flag was only ever
+// consulted at daemon-install time and the generated heartbeat.sh guard greps
+// the SUBSYSTEM-level `enabled` field rather than the per-conductor one. The
+// send-time gate is the backstop.
+func TestShouldSkipConductorHeartbeatSend_SkipsWhenHeartbeatDisabled(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := session.SaveConductorMeta(&session.ConductorMeta{
+		Name:                 "ops",
+		Profile:              "default",
+		Agent:                session.ConductorAgentClaude,
+		HeartbeatEnabled:     false,
+		HeartbeatIdleMinutes: 0, // idle gate off: disablement alone must suppress
+		CreatedAt:            "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("save conductor meta: %v", err)
+	}
+
+	storage, err := session.NewStorageWithProfile("default")
+	if err != nil {
+		t.Fatalf("setup storage: %v", err)
+	}
+
+	conductor := session.NewInstance("conductor-ops", "/tmp")
+	conductor.IsConductor = true
+	worker := session.NewInstance("worker-1", "/tmp/work")
+	worker.ParentSessionID = conductor.ID
+	if err := storage.Save([]*session.Instance{conductor, worker}); err != nil {
+		t.Fatalf("save instances: %v", err)
+	}
+
+	// Fresh activity — the idle gate would happily let a beat through.
+	writeHookStatusForTest(t, worker.ID, time.Minute)
+
+	if !shouldSkipConductorHeartbeatSend(conductor, session.ConductorHeartbeatMessagePrefix+" check") {
+		t.Fatal("heartbeat must be skipped when HeartbeatEnabled is false")
+	}
+	if !shouldSkipConductorHeartbeatSend(conductor, session.ConductorBridgeHeartbeatPrefix+" check") {
+		t.Fatal("bridge-prefix heartbeats must also be skipped when HeartbeatEnabled is false")
+	}
+	// Non-heartbeat traffic to a heartbeat-disabled conductor is untouched:
+	// the flag gates beats, not the operator's own sends.
+	if shouldSkipConductorHeartbeatSend(conductor, "status report please") {
+		t.Fatal("HeartbeatEnabled=false must not suppress ordinary messages")
+	}
+}
+
+// TestShouldSkipConductorHeartbeatSend_EnabledWithFreshActivitySends is the
+// companion negative case: the new flag check must not swallow beats for a
+// conductor that still has heartbeats enabled.
+func TestShouldSkipConductorHeartbeatSend_EnabledWithFreshActivitySends(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := session.SaveConductorMeta(&session.ConductorMeta{
+		Name:                 "ops",
+		Profile:              "default",
+		Agent:                session.ConductorAgentClaude,
+		HeartbeatEnabled:     true,
+		HeartbeatIdleMinutes: 0,
+		CreatedAt:            "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("save conductor meta: %v", err)
+	}
+
+	storage, err := session.NewStorageWithProfile("default")
+	if err != nil {
+		t.Fatalf("setup storage: %v", err)
+	}
+
+	conductor := session.NewInstance("conductor-ops", "/tmp")
+	conductor.IsConductor = true
+	if err := storage.Save([]*session.Instance{conductor}); err != nil {
+		t.Fatalf("save instances: %v", err)
+	}
+
+	if shouldSkipConductorHeartbeatSend(conductor, session.ConductorHeartbeatMessagePrefix+" check") {
+		t.Fatal("heartbeat must not be skipped while HeartbeatEnabled is true")
+	}
+}
+
 func TestWaitForCompletion_ActiveThenWaiting(t *testing.T) {
 	mock := &mockStatusChecker{
 		statuses: []string{"active", "active", "waiting"},

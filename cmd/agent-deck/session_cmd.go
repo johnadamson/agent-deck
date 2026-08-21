@@ -3045,6 +3045,19 @@ func shouldSkipConductorHeartbeatSend(inst *session.Instance, message string) bo
 	if err != nil {
 		return false
 	}
+	// The per-conductor heartbeat flag has to be enforced here, at send time,
+	// because nothing else does. It is consulted only when the daemon is
+	// installed (conductor setup), so a timer installed while the flag was
+	// true keeps firing after the flag is flipped false — a zombie beat. The
+	// generated heartbeat.sh looks like it guards against this, but its
+	// `grep '"enabled".*true'` matches the top-level `enabled` field of
+	// `conductor status --json`, which reports whether the conductor
+	// SUBSYSTEM is active (any conductor exists at all). The per-conductor
+	// flag is emitted as `heartbeat`, so the grep passes for every conductor
+	// regardless of its own setting.
+	if !meta.HeartbeatEnabled {
+		return true
+	}
 	idleMinutes := meta.GetHeartbeatIdleMinutes()
 	if idleMinutes <= 0 {
 		return false
