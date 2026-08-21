@@ -612,6 +612,17 @@ func handleConductorSetup(profile string, args []string) {
 				fmt.Printf("  [ok] Heartbeat timer installed (every %d min)\n", interval)
 			}
 		}
+	} else {
+		// Setup is re-runnable, so `--no-heartbeat` on an existing conductor is
+		// a disable path. Without this teardown the previously installed timer
+		// survives and keeps firing; the send-time gate in
+		// shouldSkipConductorHeartbeatSend now drops those beats, but leaving a
+		// live timer behind still burns a launchctl/systemd job every interval.
+		if err := session.UninstallHeartbeatDaemon(name); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove heartbeat daemon: %v\n", err)
+		} else if !*jsonOutput {
+			fmt.Println("  [ok] Heartbeat disabled (no timer installed)")
+		}
 	}
 
 	// Step 7: Install bridge (if Telegram, Slack, or Discord is configured)
