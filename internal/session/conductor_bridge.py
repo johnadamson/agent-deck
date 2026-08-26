@@ -1202,11 +1202,17 @@ def parse_conductor_prefix(text: str, conductor_names: list[str]) -> tuple[str |
     Supports formats:
       <name>: <message>
 
+    The name match is case-insensitive: phone keyboards auto-capitalize the
+    first word, so "Main: fix it" must route to conductor "main", not fall
+    through to the default conductor. The returned name is always the
+    registered (canonical) spelling.
+
     Returns (name_or_None, cleaned_message).
     """
+    lowered = text.lower()
     for name in conductor_names:
-        prefix = f"{name}:"
-        if text.startswith(prefix):
+        prefix = f"{name.lower()}:"
+        if lowered.startswith(prefix):
             return name, text[len(prefix):].strip()
 
     return None, text
