@@ -75,6 +75,7 @@ type Record struct {
 	Tool               string   `json:"tool,omitempty"`
 	Message            string   `json:"message"`
 	RequireInputPrompt bool     `json:"require_input_prompt,omitempty"`
+	TransportOverride  string   `json:"transport_override,omitempty"`
 	Images             []string `json:"images,omitempty"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`

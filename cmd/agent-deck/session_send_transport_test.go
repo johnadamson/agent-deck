@@ -1,16 +1,216 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/send"
+	"github.com/asheshgoplani/agent-deck/internal/sendqueue"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
+
+func TestEffectiveSendTransport(t *testing.T) {
+	previous := loadUserConfigForSend
+	t.Cleanup(func() { loadUserConfigForSend = previous })
+	for _, tc := range []struct {
+		name, flagValue, configValue, want string
+		configErr                          error
+		wantErr                            string
+	}{
+		{name: "config auto", configValue: "auto", want: "auto"},
+		{name: "config unset", want: "tmux"},
+		{name: "pin tmux", flagValue: "tmux", configValue: "auto", want: "tmux"},
+		{name: "opt in", flagValue: "auto", want: "auto"},
+		{name: "skip broken config", flagValue: "auto", configErr: errors.New("malformed TOML"), want: "auto"},
+		{name: "invalid", flagValue: "socket", wantErr: `--transport must be "tmux" or "auto"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configLoads := 0
+			loadUserConfigForSend = func() (*session.UserConfig, error) {
+				configLoads++
+				return &session.UserConfig{SendTransport: tc.configValue}, tc.configErr
+			}
+			value, warn, err := effectiveSendTransport(tc.flagValue)
+			errText := ""
+			if err != nil {
+				errText = err.Error()
+			}
+			if value != tc.want || warn != "" || errText != tc.wantErr {
+				t.Fatalf("effectiveSendTransport(%q) = (%q, %q, %v), want (%q, no warning, %q)", tc.flagValue, value, warn, err, tc.want, tc.wantErr)
+			}
+			if (tc.flagValue == "" && configLoads != 1) || (tc.flagValue != "" && configLoads != 0) {
+				t.Fatalf("unexpected config loads: %d", configLoads)
+			}
+		})
+	}
+}
+
+func TestChildSendArgsTransportOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts childSendOptions
+	}{
+		{name: "plain"},
+		{name: "guarded", opts: childSendOptions{requireInputPrompt: true}},
+		{name: "released", opts: childSendOptions{requireInputPrompt: true, noWait: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := append(childSendArgs("test-profile", "target", "message", tc.opts), "--transport", "tmux")
+			opts := tc.opts
+			opts.transportOverride = "tmux"
+			got := childSendArgs("test-profile", "target", "message", opts)
+			if !slices.Equal(got, want) {
+				t.Fatalf("childSendArgs = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestQueuedSendTransportOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		status             string
+		requireInputPrompt bool
+		wantOptions        childSendOptions
+	}{
+		{name: "plain", status: "idle", wantOptions: childSendOptions{transportOverride: "tmux"}},
+		{
+			name: "guarded", status: "idle", requireInputPrompt: true,
+			wantOptions: childSendOptions{requireInputPrompt: true, transportOverride: "tmux"},
+		},
+		{
+			name: "released", status: queueReleaseStatus,
+			wantOptions: childSendOptions{requireInputPrompt: true, noWait: true, transportOverride: "tmux"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, variant := range []struct {
+				name, override, wantLauncher string
+			}{
+				{name: "override", override: "tmux", wantLauncher: "with options"},
+				{name: "legacy", wantLauncher: tc.name},
+			} {
+				t.Run(variant.name, func(t *testing.T) {
+					previous, previousGuarded, previousRelease, previousWithOptions := sendChild, sendChildGuarded, sendChildRelease, sendChildWithOptions
+					t.Cleanup(func() {
+						sendChild, sendChildGuarded, sendChildRelease, sendChildWithOptions = previous, previousGuarded, previousRelease, previousWithOptions
+					})
+					launcher := ""
+					stub := func(name string) func(string, string, string, string) (int, func() int, error) {
+						return func(_, _, _, _ string) (int, func() int, error) {
+							if name != variant.wantLauncher {
+								t.Fatalf("used %s launcher, want %s", name, variant.wantLauncher)
+							}
+							launcher = name
+							return 1, func() int { return 0 }, nil
+						}
+					}
+					sendChild = stub("plain")
+					sendChildGuarded = stub("guarded")
+					sendChildRelease = stub("released")
+					withOptions := stub("with options")
+					sendChildWithOptions = func(profile, id, message, resultPath string, opts childSendOptions) (int, func() int, error) {
+						if variant.override == "" {
+							t.Fatal("legacy record called sendChildWithOptions")
+						}
+						if opts != tc.wantOptions {
+							t.Fatalf("sendChildWithOptions got %+v, want %+v", opts, tc.wantOptions)
+						}
+						return withOptions(profile, id, message, resultPath)
+					}
+					rec := &sendqueue.Record{
+						SendID: sendqueue.NewID(time.Now()), SessionID: "target",
+						RequireInputPrompt: tc.requireInputPrompt, TransportOverride: variant.override,
+					}
+					set := func(update func(*sendqueue.Record)) error {
+						update(rec)
+						return nil
+					}
+					if !typeQueued("", t.TempDir(), rec, tc.status, "", 0, set) || launcher != variant.wantLauncher {
+						t.Fatalf("typeQueued used launcher %q, want %q", launcher, variant.wantLauncher)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestQueueSendPersistsTransportOverride(t *testing.T) {
+	const helper = "AGENTDECK_QUEUE_SEND_TRANSPORT_TEST"
+	const profile = "ch_support_test"
+	if os.Getenv(helper) == "1" {
+		storage, err := session.NewStorageWithProfile(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A stopped target makes queueSend exit after saving, without launching a worker.
+		queueSend(profile, storage, &session.Instance{ID: "target"}, "message", nil, false, "", false, "tmux", NewCLIOutput(false, false))
+		t.Fatal("queueSend returned for a stopped target")
+	}
+
+	home := t.TempDir()
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestQueueSendPersistsTransportOverride$")
+	cmd.Env = agentDeckTestEnv(home, []string{helper + "=1", "AGENT_DECK_TASK6_HELPER_PROCESS=1"})
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(output), "target not running") {
+		t.Fatalf("queueSend exit = %v, output = %s", err, output)
+	}
+	dir := sendqueue.Dir(filepath.Join(home, ".local", "share", "agent-deck", "profiles", profile))
+	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("queue record files = %v, err = %v, want one file", paths, err)
+	}
+	data, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		TransportOverride string `json:"transport_override"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.TransportOverride != "tmux" {
+		t.Fatalf("saved transport_override = %q, want tmux", saved.TransportOverride)
+	}
+}
+
+func TestSessionSendRejectsEmptyTransport(t *testing.T) {
+	const helper = "AGENTDECK_EMPTY_SEND_TRANSPORT_TEST"
+	if os.Getenv(helper) == "1" {
+		handleSessionSend("default", []string{"target", "--message-file", "missing-message.txt", "--transport="})
+		return
+	}
+
+	home := t.TempDir()
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestSessionSendRejectsEmptyTransport$")
+	cmd.Dir = home
+	cmd.Env = agentDeckTestEnv(home, []string{helper + "=1", "AGENT_DECK_TASK6_HELPER_PROCESS=1"})
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	const want = "Error: --transport must be \"tmux\" or \"auto\"\n"
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || string(output) != want {
+		t.Fatalf("session send exit = %v, output = %q, want exit 1 and %q", err, output, want)
+	}
+}
+
+func TestRemoteSendTransportTakesAValue(t *testing.T) {
+	args := []string{"session", "send", "target", "--transport", "--message-file", "/missing"}
+	forwarded, _, closeInput, err := remoteMessageInput(args)
+	defer closeInput()
+	if err != nil || strings.Join(forwarded, " ") != strings.Join(args, " ") {
+		t.Fatalf("remoteMessageInput = %v, %v, want original arguments", forwarded, err)
+	}
+}
 
 // alwaysSocketOK is a resolve stub that always succeeds, so any row using it
 // reaches chooseSendTransport's final "otherwise" branch when nothing earlier

@@ -3116,6 +3116,7 @@ func handleSessionSend(profile string, args []string) {
 	queueWorker := fs.Bool("queue-worker", false, "Internal: deliver a durable queued send directly")
 	noTag := fs.Bool("no-tag", false, "Do not prefix the [agent-deck from:<id>] envelope a send from inside a session gets by default ([send] tag_sends)")
 	requireInputPrompt := fs.Bool("require-input-prompt", false, "Refuse with menu_open unless an input prompt is visible immediately before each keystroke batch")
+	transport := fs.String("transport", "", "Override config.toml for this send (tmux or auto)")
 	var images imageList
 	fs.Var(&images, "image", "Attach an image (repeatable): Claude Code and Gemini get @<copy under .agentdeck-images/>; Codex and other harnesses exit 2")
 
@@ -3131,6 +3132,7 @@ func handleSessionSend(profile string, args []string) {
 		fmt.Println("tmux, since Claude's socket path renders slash commands as literal text.")
 		fmt.Println("SSH-backed (remote) targets always use tmux too: the messaging socket must")
 		fmt.Println("be dialed on the machine that owns it.")
+		fmt.Println("Use --transport tmux|auto to override config.toml for one send.")
 		fmt.Println()
 		fmt.Println("Options:")
 		fs.PrintDefaults()
@@ -3175,6 +3177,21 @@ func handleSessionSend(profile string, args []string) {
 	remaining := fs.Args()
 
 	out := NewCLIOutput(*jsonOutput, *quiet)
+
+	var transportErr error
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "transport" && *transport == "" {
+			transportErr = errInvalidSendTransport
+		}
+	})
+	sendTransportValue := ""
+	if *transport != "" {
+		sendTransportValue, _, transportErr = effectiveSendTransport(*transport)
+	}
+	if transportErr != nil {
+		out.Error(transportErr.Error(), ErrCodeInvalidOperation)
+		exitCLI(1)
+	}
 
 	needPositionalMessage := *messageFile == ""
 	if len(remaining) < 1 || (needPositionalMessage && len(remaining) < 2) {
@@ -3275,7 +3292,7 @@ func handleSessionSend(profile string, args []string) {
 			if *noTag {
 				ledgerSender = "" // --no-tag: never attributed to an inherited session
 			}
-			queueSend(profile, storage, inst, message, copies, tagged, ledgerSender, *requireInputPrompt, out) // exits on failure
+			queueSend(profile, storage, inst, message, copies, tagged, ledgerSender, *requireInputPrompt, sendTransportValue, out) // exits on failure
 			recordSent()
 			return
 		}
@@ -3534,9 +3551,12 @@ func handleSessionSend(profile string, args []string) {
 	// this send. chooseSendTransport is pure and every check it runs happens
 	// strictly before any byte is written, so falling back to tmux here is
 	// indistinguishable from today's behavior on any resolution failure.
-	sendTransportValue, sendTransportWarn := sendTransportFromConfig()
-	if sendTransportWarn != "" {
-		fmt.Fprintln(os.Stderr, sendTransportWarn)
+	if sendTransportValue == "" {
+		value, warn := sendTransportFromConfig()
+		sendTransportValue = value
+		if warn != "" {
+			fmt.Fprintln(os.Stderr, warn)
+		}
 	}
 	// The busy probe reads the same hook-driven status --defer-if-busy holds
 	// on, so it needs the same lookup closure. performSend only calls it

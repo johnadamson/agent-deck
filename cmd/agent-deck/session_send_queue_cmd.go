@@ -160,7 +160,7 @@ func ledgerQueuedSend(r *sendqueue.Record, inboxOwned bool) {
 
 // queueSend records the send and hands it to the target's worker. It never
 // types anything itself; it returns at once.
-func queueSend(profile string, storage *session.Storage, inst *session.Instance, message string, images []string, tagged bool, ledgerSender string, requireInputPrompt bool, out *CLIOutput) {
+func queueSend(profile string, storage *session.Storage, inst *session.Instance, message string, images []string, tagged bool, ledgerSender string, requireInputPrompt bool, transportOverride string, out *CLIOutput) {
 	now := time.Now()
 	dir := sendQueueDir(storage)
 	status := "unknown"
@@ -173,6 +173,7 @@ func queueSend(profile string, storage *session.Storage, inst *session.Instance,
 		SendID: id, State: sendqueue.StateQueued, Verdict: "queued", TargetStatus: status,
 		SessionID: inst.ID, SessionTitle: inst.Title, Tool: inst.Tool, Message: message, Images: images,
 		RequireInputPrompt: requireInputPrompt,
+		TransportOverride:  transportOverride,
 		CreatedAt:          now.UTC().Format(time.RFC3339Nano), UpdatedAt: now.UTC().Format(time.RFC3339Nano),
 		Deadline: now.Add(sendqueue.DefaultRetryBudget).UTC().Format(time.RFC3339Nano),
 		Sender:   ledgerSender,
@@ -519,6 +520,7 @@ func classifyChild(result map[string]interface{}, code int) (childOutcome, strin
 
 // sendChild starts the child that types one queued message; tests replace it.
 var sendChild = startChildSend
+var sendChildWithOptions = startChildSendWithOptions
 
 // sendChildRelease types an entry released by `session queue release`: the
 // guarded child (--require-input-prompt) without the readiness wait
@@ -649,8 +651,18 @@ func typeQueued(profile, dir string, rec *sendqueue.Record, status, path string,
 	}); err != nil {
 		return false
 	}
+	released := status == queueReleaseStatus
 	child := sendChild
-	if status == queueReleaseStatus {
+	if rec.TransportOverride != "" {
+		opts := childSendOptions{
+			requireInputPrompt: rec.RequireInputPrompt || released,
+			noWait:             released,
+			transportOverride:  rec.TransportOverride,
+		}
+		child = func(profile, id, message, resultPath string) (int, func() int, error) {
+			return sendChildWithOptions(profile, id, message, resultPath, opts)
+		}
+	} else if released {
 		child = sendChildRelease
 	} else if rec.RequireInputPrompt {
 		child = sendChildGuarded
@@ -873,6 +885,7 @@ func startChildSend(profile, id, message, resultPath string) (int, func() int, e
 type childSendOptions struct {
 	requireInputPrompt bool // --require-input-prompt: refuse untyped without an input prompt
 	noWait             bool // --no-wait: skip the readiness wait
+	transportOverride  string
 }
 
 // releaseChildOptions: `session queue release` forces the guarded send and
@@ -887,6 +900,9 @@ func childSendArgs(profile, id, msgPath string, opts childSendOptions) []string 
 	}
 	if opts.noWait {
 		args = append(args, "--no-wait")
+	}
+	if opts.transportOverride != "" {
+		args = append(args, "--transport", opts.transportOverride)
 	}
 	return args
 }

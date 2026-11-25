@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `session send --transport tmux|auto` overrides config.toml for a single send. Queued sends keep the override until delivery.
+
 ## [1.16.28] - 2026-10-10
 
 ### Security and toolchain

@@ -220,6 +220,21 @@ func resolveClaudeSocketTargetForInstance(inst *session.Instance) (send.ClaudeSo
 // without touching a real config.toml.
 var loadUserConfigForSend = session.LoadUserConfig
 
+var errInvalidSendTransport = errors.New(`--transport must be "tmux" or "auto"`)
+
+// effectiveSendTransport resolves an override or falls back to config for an empty value.
+func effectiveSendTransport(flagValue string) (value, warn string, err error) {
+	switch flagValue {
+	case "":
+		value, warn = sendTransportFromConfig()
+		return value, warn, nil
+	case "tmux", "auto":
+		return flagValue, "", nil
+	default:
+		return "", "", errInvalidSendTransport
+	}
+}
+
 // sendTransportFromConfig resolves the send_transport config value for one
 // `session send` call. Every uncertain case resolves to "tmux": the socket
 // transport is opt-in, so only a literal send_transport = "auto" selects it

@@ -192,8 +192,8 @@ func remoteMessageInput(args []string) ([]string, io.Reader, func(), error) {
 		offset = 2
 	}
 	// The boolean options of launch/start/send do not consume a following token.
-	// Unknown options are conservatively treated as value-taking: they must never
-	// cause a flag-shaped value to be opened as a controller file.
+	// All other options, including send's --transport, take a value here.
+	// A flag-shaped value must never be opened as a controller file.
 	// The recall booleans (phrase, subagents, no-sweep, cards, full, raw,
 	// yes) are listed too, so a forwarded recall verb can never have one
 	// of them mis-shifted as value-taking.
